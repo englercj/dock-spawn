@@ -1,6 +1,6 @@
 (function()
 {
-    dockspawn = {version: "0.0.2"};
+    dockspawn = {version: "0.0.3"};
 
 /**
  * A tab handle represents the tab button on the tab strip
@@ -331,6 +331,15 @@ dockspawn.Dialog = function(panel, dockManager)
     this.dockManager = dockManager;
     this.eventListener = dockManager;
     this._initialize();
+    this.dockManager.context.model.dialogs.push(this);
+        this.position = {x: 0, y: 0};
+    this.dockManager.notifyOnCreateDialog(this);
+
+};
+
+dockspawn.Dialog.prototype.saveState = function(x, y){
+    this.position = {x: x, y: y};
+    this.dockManager.notifyOnChangeDialogPosition(this, x, y);
 };
 
 dockspawn.Dialog.fromElement = function(id, dockManager)
@@ -358,8 +367,15 @@ dockspawn.Dialog.prototype._initialize = function()
 
 dockspawn.Dialog.prototype.setPosition = function(x, y)
 {
+    this.position = {x: x, y: y};
     this.elementDialog.style.left = x + "px";
     this.elementDialog.style.top = y + "px";
+    this.dockManager.notifyOnChangeDialogPosition(this, x, y);
+};
+
+dockspawn.Dialog.prototype.getPosition = function()
+{
+    return { left:  this.position.x , top: this.position.y };
 };
 
 dockspawn.Dialog.prototype.onMouseDown = function(e)
@@ -379,6 +395,7 @@ dockspawn.Dialog.prototype.destroy = function()
     removeNode(this.elementDialog);
     this.draggable.removeDecorator();
     removeNode(this.panel.elementPanel);
+     this.dockManager.context.model.dialogs.remove(this);
     delete this.panel.floatingDialog;
 };
 
@@ -831,6 +848,7 @@ dockspawn.DockManager.prototype.initialize = function()
     var documentNode = new dockspawn.DockNode(this.context.documentManagerView);
     this.context.model.rootNode = documentNode;
     this.context.model.documentManagerNode = documentNode;
+    this.context.model.dialogs = [];
     this.setRootNode(this.context.model.rootNode);
     // Resize the layout
     this.resize(this.element.clientWidth, this.element.clientHeight);
@@ -927,6 +945,8 @@ dockspawn.DockManager.prototype.onDialogDragEnded = function(sender, e)
     this.dockWheel.onDialogDropped(sender);
     this.dockWheel.hideWheel();
     delete this.dockWheel.activeDialog;
+    //TODO: not so good
+    sender.saveState(sender.elementDialog.offsetLeft, sender.elementDialog.offsetTop);
 };
 
 dockspawn.DockManager.prototype.onMouseMoved = function(e)
@@ -1171,6 +1191,26 @@ dockspawn.DockManager.prototype.notifyOnUnDock = function(dockNode)
 	});
 };
 
+dockspawn.DockManager.prototype.notifyOnCreateDialog = function(dialog)
+{
+    var self = this;
+    this.layoutEventListeners.forEach(function(listener) { 
+        if (listener.onCreateDialog) {
+            listener.onCreateDialog(self, dialog); 
+        }
+    });
+};
+
+dockspawn.DockManager.prototype.notifyOnChangeDialogPosition = function(dialog, x, y)
+{
+    var self = this;
+    this.layoutEventListeners.forEach(function(listener) { 
+        if (listener.onChangeDialogPosition) {
+            listener.onChangeDialogPosition(self, dialog, x, y); 
+        }
+    });
+};
+
 dockspawn.DockManager.prototype.saveState = function()
 {
     var serializer = new dockspawn.DockGraphSerializer();
@@ -1278,6 +1318,7 @@ dockspawn.DockLayoutEngine.prototype.undock = function(node)
         }
     }
     this.dockManager.invalidate();
+   
 	this.dockManager.notifyOnUnDock(node);
 };
 
@@ -2601,9 +2642,10 @@ dockspawn.DockGraphDeserializer = function(dockManager)
 
 dockspawn.DockGraphDeserializer.prototype.deserialize = function(_json)
 {
-    var graphInfo = JSON.parse(_json);
+    var info = JSON.parse(_json);
     var model = new dockspawn.DockModel();
-    model.rootNode = this._buildGraph(graphInfo);
+    model.rootNode = this._buildGraph(info.graphInfo);
+    model.dialogs = this._buildDialogs(info.dialogsInfo);
     return model;
 };
 
@@ -2673,6 +2715,25 @@ dockspawn.DockGraphDeserializer.prototype._createContainer = function(nodeInfo, 
     // container.performLayout(childContainers);
     return container;
 };
+
+dockspawn.DockGraphDeserializer.prototype._buildDialogs = function(dialogsInfo)
+{
+    var dialogs = [];
+    dialogsInfo.forEach(function(dialogInfo) {
+        var containerType = dialogInfo.containerType;
+        var containerState = dialogInfo.state;
+        var container;
+        if (containerType == "panel"){
+            container = new dockspawn.PanelContainer.loadFromState(containerState, this.dockManager);
+            removeNode(container.elementPanel);
+            var dialog = new dockspawn.Dialog(container, this.dockManager);
+            dialog.setPosition(dialogInfo.position.left, dialogInfo.position.top);
+            dialogs.push(dialog);
+        }
+
+    });
+    return dialogs; 
+}
 /**
  * The serializer saves / loads the state of the dock layout hierarchy
  */
@@ -2683,7 +2744,8 @@ dockspawn.DockGraphSerializer = function()
 dockspawn.DockGraphSerializer.prototype.serialize = function(model)
 {
     var graphInfo = this._buildGraphInfo(model.rootNode);
-    return JSON.stringify(graphInfo);
+    var dialogs = this._buildDialogsInfo(model.dialogs);
+    return JSON.stringify({graphInfo: graphInfo, dialogsInfo: dialogs});
 };
 
 dockspawn.DockGraphSerializer.prototype._buildGraphInfo = function(node)
@@ -2702,6 +2764,24 @@ dockspawn.DockGraphSerializer.prototype._buildGraphInfo = function(node)
     nodeInfo.state = nodeState;
     nodeInfo.children = childrenInfo;
     return nodeInfo;
+};
+
+dockspawn.DockGraphSerializer.prototype._buildDialogsInfo = function(dialogs)
+{
+    var dialogsInfo = [];
+    dialogs.forEach(function(dialog) {
+        var panelState = {};
+        var panelContainer = dialog.panel;
+        panelContainer.saveState(panelState);
+
+        var panelInfo = {};
+        panelInfo.containerType = panelContainer.containerType;
+        panelInfo.state = panelState;
+        panelInfo.children = [];
+        panelInfo.position = dialog.getPosition();
+        dialogsInfo.push(panelInfo)
+    })
+    return dialogsInfo;
 };
 function getPixels(pixels)
 {
@@ -2880,5 +2960,12 @@ dockspawn.UndockInitiator.prototype._requestUndock = function(e)
     var dragOffset = new Point(dragOffsetX, dragOffsetY);
     this.listener(e, dragOffset);
 };
+Array.prototype.remove = function(value) {
+  var idx = this.indexOf(value);
+  if (idx != -1) {
+      return this.splice(idx, 1); // The second parameter is the number of elements to remove.
+  }
+  return false;
+}
 
 })();
